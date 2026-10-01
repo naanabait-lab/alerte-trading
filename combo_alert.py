@@ -1,28 +1,31 @@
 """
 Combo Signal (EMA + VWAP + RSI + Volume) -> alertes Telegram
-Installation : pip install yfinance pandas requests
-Variables d'environnement : TG_TOKEN et TG_CHAT_ID
+Surveille plusieurs actifs (BTC + Or) en une seule exécution.
 """
 import os
+import json
 import requests
 import pandas as pd
 import yfinance as yf
 
 # ============ CONFIG ============
-SYMBOL   = "BTC-USD"      # "BTC-USD" pour Bitcoin, "GC=F" pour l'or
-IS_BTC   = "BTC" in SYMBOL
-INTERVAL = "15m"          # 1m, 5m, 15m, 30m, 1h...
+# Actif Yahoo -> timeframe
+SYMBOLS = {
+    "BTC-USD": "15m",   # Bitcoin
+    "GC=F": "15m",      # Or (Gold futures)
+}
 
 EMA_FAST, EMA_SLOW = 9, 21
 RSI_LEN, ATR_LEN, VOL_MA = 14, 14, 20
 RSI_LONG = (50, 70)
 RSI_SHORT = (30, 50)
 
-# (SL, TP1, TP2, TP3) en multiples d'ATR
-MULTS = (1.5, 1.0, 2.0, 3.5) if IS_BTC else (1.0, 1.0, 2.0, 3.0)
+MULTS_BTC = (1.5, 1.0, 2.0, 3.5)    # SL, TP1, TP2, TP3 (x ATR)
+MULTS_GOLD = (1.0, 1.0, 2.0, 3.0)
 
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
+STATE_FILE = "last_alert.txt"
 
 
 # ============ INDICATEURS ============
@@ -35,7 +38,6 @@ def compute(df):
     df["emaF"] = c.ewm(span=EMA_FAST, adjust=False).mean()
     df["emaS"] = c.ewm(span=EMA_SLOW, adjust=False).mean()
 
-    # VWAP remis à zéro chaque jour (comme Pine)
     day = df.index.date
     pv = (c * df["Volume"]).groupby(day).cumsum()
     v = df["Volume"].groupby(day).cumsum()
@@ -76,25 +78,32 @@ def send(msg):
         print("Erreur Telegram:", e)
 
 
-def build_message(row, is_long):
+def build_message(symbol, interval, row, is_long):
+    mults = MULTS_BTC if "BTC" in symbol else MULTS_GOLD
+    name = "BTC" if "BTC" in symbol else "GOLD"
     p, a = row.Close, row.atr
     sgn = 1 if is_long else -1
-    sl, t1, t2, t3 = (p - sgn * a * MULTS[0], p + sgn * a * MULTS[1],
-                      p + sgn * a * MULTS[2], p + sgn * a * MULTS[3])
-    return (f"{'🟢 LONG' if is_long else '🔴 SHORT'} {SYMBOL} ({INTERVAL})\n"
+    sl, t1, t2, t3 = (p - sgn * a * mults[0], p + sgn * a * mults[1],
+                      p + sgn * a * mults[2], p + sgn * a * mults[3])
+    return (f"{'🟢 LONG' if is_long else '🔴 SHORT'} {name} ({interval})\n"
             f"Entrée: {p:.2f}\nSL: {sl:.2f}\n"
             f"TP1: {t1:.2f}\nTP2: {t2:.2f}\nTP3: {t3:.2f}\n"
             f"RSI: {row.rsi:.1f}")
 
 
-# ============ EXÉCUTION UNIQUE (lancée par GitHub Actions) ============
-STATE_FILE = "last_alert.txt"
+# ============ ÉTAT (anti-doublons) ============
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
-def main():
-    if os.environ.get("TEST_MODE") == "1":
-        send(f"✅ Test OK : le bot fonctionne ({SYMBOL}, {INTERVAL})")
-    df = yf.download(SYMBOL, period="5d", interval=INTERVAL,
+# ============ EXÉCUTION UNIQUE ============
+def check(symbol, interval, state):
+    df = yf.download(symbol, period="5d", interval=interval,
                      progress=False, auto_adjust=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -102,12 +111,27 @@ def main():
     bar = df.iloc[-2]          # dernière bougie CLÔTURÉE
     ts = str(df.index[-2])
 
-    last = open(STATE_FILE).read().strip() if os.path.exists(STATE_FILE) else ""
-    if ts != last and (bar["long"] or bar["short"]):
-        send(build_message(bar, bool(bar["long"])))
-        open(STATE_FILE, "w").write(ts)
-    else:
-        print("Pas de nouveau signal", ts)
+    if ts != state.get(symbol) and (bar["long"] or bar["short"]):
+        send(build_message(symbol, interval, bar, bool(bar["long"])))
+        state[symbol] = ts
+        return True
+    print(f"{symbol}: pas de nouveau signal ({ts})")
+    return False
+
+
+def main():
+    if os.environ.get("TEST_MODE") == "1":
+        send("✅ Test OK : le bot fonctionne (" + ", ".join(SYMBOLS) + ")")
+    state = load_state()
+    changed = False
+    for symbol, interval in SYMBOLS.items():
+        try:
+            changed |= check(symbol, interval, state)
+        except Exception as e:
+            print(f"Erreur sur {symbol}:", e)
+    if changed:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
 
 
 if __name__ == "__main__":
