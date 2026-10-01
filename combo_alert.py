@@ -9,12 +9,14 @@ import pandas as pd
 import yfinance as yf
 
 # ============ CONFIG ============
-# Actif Yahoo -> (timeframe, nb de bougies récentes vérifiées)
+# (actif Yahoo, timeframe, nb de bougies récentes vérifiées)
 # La vérification de plusieurs bougies évite de rater un signal si GitHub a du retard.
-SYMBOLS = {
-    "BTC-USD": ("15m", 2),   # Bitcoin
-    "GC=F": ("5m", 3),       # Or (Gold futures)
-}
+# Tu peux ajouter autant de lignes que tu veux.
+WATCH = [
+    ("BTC-USD", "15m", 2),   # Bitcoin 15 minutes
+    ("GC=F", "5m", 3),       # Or 5 minutes
+    ("GC=F", "15m", 2),      # Or 15 minutes
+]
 
 EMA_FAST, EMA_SLOW = 9, 21
 RSI_LEN, ATR_LEN, VOL_MA = 14, 14, 20
@@ -111,7 +113,8 @@ def check(symbol, interval, lookback, state):
         df.columns = df.columns.get_level_values(0)
     df = compute(df.dropna())
 
-    last = pd.Timestamp(state[symbol]) if symbol in state else None
+    key = f"{symbol}_{interval}"
+    last = pd.Timestamp(state[key]) if key in state else None
     # bougies clôturées récentes (la dernière ligne est la bougie en cours, on l'ignore)
     recent = df.iloc[-(lookback + 1):-1]
     sent = False
@@ -121,24 +124,24 @@ def check(symbol, interval, lookback, state):
         if last is not None and ts <= last:
             continue                           # déjà alerté
         send(build_message(symbol, interval, bar, bool(bar["long"]), ts))
-        state[symbol] = str(ts)
+        state[key] = str(ts)
         last = ts
         sent = True
     if not sent:
-        print(f"{symbol}: pas de nouveau signal ({df.index[-2]})")
+        print(f"{symbol} {interval}: pas de nouveau signal ({df.index[-2]})")
     return sent
 
 
 def main():
     if os.environ.get("TEST_MODE") == "1":
-        send("✅ Test OK : le bot fonctionne (" + ", ".join(SYMBOLS) + ")")
+        send("✅ Test OK : le bot fonctionne (" + ", ".join(f"{s} {i}" for s, i, _ in WATCH) + ")")
     state = load_state()
     changed = False
-    for symbol, (interval, lookback) in SYMBOLS.items():
+    for symbol, interval, lookback in WATCH:
         try:
             changed |= check(symbol, interval, lookback, state)
         except Exception as e:
-            print(f"Erreur sur {symbol}:", e)
+            print(f"Erreur sur {symbol} {interval}:", e)
     if changed:
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
