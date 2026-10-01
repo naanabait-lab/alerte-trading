@@ -12,7 +12,7 @@ import yfinance as yf
 # Actif Yahoo -> timeframe
 SYMBOLS = {
     "BTC-USD": "15m",   # Bitcoin
-    "GC=F": "15m",      # Or (Gold futures)
+    "GC=F": "05m",      # Or (Gold futures)
 }
 
 EMA_FAST, EMA_SLOW = 9, 21
