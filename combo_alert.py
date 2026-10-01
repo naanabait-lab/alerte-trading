@@ -9,10 +9,11 @@ import pandas as pd
 import yfinance as yf
 
 # ============ CONFIG ============
-# Actif Yahoo -> timeframe
+# Actif Yahoo -> (timeframe, nb de bougies récentes vérifiées)
+# La vérification de plusieurs bougies évite de rater un signal si GitHub a du retard.
 SYMBOLS = {
-    "BTC-USD": "15m",   # Bitcoin
-    "GC=F": "05m",      # Or (Gold futures)
+    "BTC-USD": ("15m", 2),   # Bitcoin
+    "GC=F": ("5m", 3),       # Or (Gold futures)
 }
 
 EMA_FAST, EMA_SLOW = 9, 21
@@ -78,7 +79,7 @@ def send(msg):
         print("Erreur Telegram:", e)
 
 
-def build_message(symbol, interval, row, is_long):
+def build_message(symbol, interval, row, is_long, ts):
     mults = MULTS_BTC if "BTC" in symbol else MULTS_GOLD
     name = "BTC" if "BTC" in symbol else "GOLD"
     p, a = row.Close, row.atr
@@ -88,7 +89,8 @@ def build_message(symbol, interval, row, is_long):
     return (f"{'🟢 LONG' if is_long else '🔴 SHORT'} {name} ({interval})\n"
             f"Entrée: {p:.2f}\nSL: {sl:.2f}\n"
             f"TP1: {t1:.2f}\nTP2: {t2:.2f}\nTP3: {t3:.2f}\n"
-            f"RSI: {row.rsi:.1f}")
+            f"RSI: {row.rsi:.1f}\n"
+            f"Bougie: {ts.strftime('%H:%M')} UTC")
 
 
 # ============ ÉTAT (anti-doublons) ============
@@ -102,21 +104,29 @@ def load_state():
 
 
 # ============ EXÉCUTION UNIQUE ============
-def check(symbol, interval, state):
+def check(symbol, interval, lookback, state):
     df = yf.download(symbol, period="5d", interval=interval,
                      progress=False, auto_adjust=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df = compute(df.dropna())
-    bar = df.iloc[-2]          # dernière bougie CLÔTURÉE
-    ts = str(df.index[-2])
 
-    if ts != state.get(symbol) and (bar["long"] or bar["short"]):
-        send(build_message(symbol, interval, bar, bool(bar["long"])))
-        state[symbol] = ts
-        return True
-    print(f"{symbol}: pas de nouveau signal ({ts})")
-    return False
+    last = pd.Timestamp(state[symbol]) if symbol in state else None
+    # bougies clôturées récentes (la dernière ligne est la bougie en cours, on l'ignore)
+    recent = df.iloc[-(lookback + 1):-1]
+    sent = False
+    for ts, bar in recent.iterrows():          # de la plus ancienne à la plus récente
+        if not (bar["long"] or bar["short"]):
+            continue
+        if last is not None and ts <= last:
+            continue                           # déjà alerté
+        send(build_message(symbol, interval, bar, bool(bar["long"]), ts))
+        state[symbol] = str(ts)
+        last = ts
+        sent = True
+    if not sent:
+        print(f"{symbol}: pas de nouveau signal ({df.index[-2]})")
+    return sent
 
 
 def main():
@@ -124,9 +134,9 @@ def main():
         send("✅ Test OK : le bot fonctionne (" + ", ".join(SYMBOLS) + ")")
     state = load_state()
     changed = False
-    for symbol, interval in SYMBOLS.items():
+    for symbol, (interval, lookback) in SYMBOLS.items():
         try:
-            changed |= check(symbol, interval, state)
+            changed |= check(symbol, interval, lookback, state)
         except Exception as e:
             print(f"Erreur sur {symbol}:", e)
     if changed:
