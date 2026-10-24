@@ -23,7 +23,9 @@ COMBO_WATCH = [
     ("GC=F", "15m", 2),
 ]
 ZIG_WATCH = [
+    ("BTC-USD", "5m", 4),
     ("BTC-USD", "15m", 3),
+    ("GC=F", "5m", 4),
     ("GC=F", "15m", 3),
 ]
 
